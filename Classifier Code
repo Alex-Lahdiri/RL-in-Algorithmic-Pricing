@@ -1,0 +1,560 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.metrics import (
+    confusion_matrix, classification_report,
+    roc_auc_score, roc_curve,
+)
+
+TRAJ_DIR = Path("trajectories_perturbed")
+
+def extract_features(price_series):
+    """Scale-invariant features from a 1D price time series. Works for any length >= 5."""
+    p = np.asarray(price_series, dtype=float)
+    p = p[~np.isnan(p)]
+    if len(p) < 5:
+        return None
+    dp = np.diff(p)
+
+    rng = p.max() - p.min()
+    norm_level = (p.mean() - p.min()) / rng if rng > 1e-9 else 0.5
+
+    autocorr_1 = np.corrcoef(p[:-1], p[1:])[0, 1] if p.std() > 1e-9 else 0.0
+    autocorr_1 = 0.0 if np.isnan(autocorr_1) else autocorr_1
+
+    change_threshold = 0.001 * (p.mean() or 1.0)
+    change_freq = (np.abs(dp) > change_threshold).mean() if len(dp) else 0.0
+
+    return {
+        "norm_level":        norm_level,
+        "coef_variation":    p.std() / p.mean() if p.mean() > 1e-9 else 0.0,
+        "mean_abs_change":   np.abs(dp).mean() / p.mean() if p.mean() > 1e-9 else 0.0,
+        "std_change":        dp.std() / p.mean() if p.mean() > 1e-9 else 0.0,
+        "autocorr_lag1":     autocorr_1,
+        "change_frequency":  change_freq,
+        "max_run_constant":  _longest_constant_run(p) / len(p),
+    }
+
+
+def _longest_constant_run(p, tol=1e-9):
+    """Longest run of consecutive identical (within tol) prices."""
+    longest = current = 1
+    for i in range(1, len(p)):
+        if abs(p[i] - p[i-1]) < tol:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 1
+    return longest
+
+idx = pd.read_csv(TRAJ_DIR / "index.csv")
+
+records = []
+for _, row in idx.iterrows():
+    traj = np.load(TRAJ_DIR / row["traj_file"])   # shape (1000, 2)
+    for firm_id in range(traj.shape[1]):
+        feats = extract_features(traj[:, firm_id])
+        if feats is None:
+            continue
+        feats.update({
+            "delta": row["delta"],
+            "alpha": row["alpha"],
+            "beta": row["beta"],
+            "seed": row["seed"],
+            "firm": firm_id,
+        })
+        records.append(feats)
+
+sim_df = pd.DataFrame(records)
+sim_df["label"] = (sim_df["delta"] > 0.5).astype(int)   # 1 = collusive
+
+print(f"Training examples: {len(sim_df)}  "
+      f"({sim_df['label'].sum()} collusive, "
+      f"{len(sim_df) - sim_df['label'].sum()} competitive)")
+sim_df.head()
+
+FEATURE_COLS = [
+    "norm_level", "coef_variation", "mean_abs_change",
+    "std_change", "autocorr_lag1", "change_frequency", "max_run_constant",
+]
+
+fig, axes = plt.subplots(2, 4, figsize=(13, 6), sharey=True)
+for ax, feat in zip(axes.flat, FEATURE_COLS):
+    for label, color in [(0, "tab:blue"), (1, "tab:orange")]:
+        ax.hist(sim_df.loc[sim_df["label"] == label, feat],
+                bins=12, alpha=0.6, color=color,
+                label="collusive" if label == 1 else "competitive")
+    ax.set_title(feat, fontsize=10)
+    ax.legend(fontsize=8)
+
+for ax in axes.flat[len(FEATURE_COLS):]:
+    ax.axis("off")
+plt.tight_layout(); plt.show()
+
+X = sim_df[FEATURE_COLS].values
+y = sim_df["label"].values
+
+clf = GradientBoostingClassifier(n_estimators=200, max_depth=3, random_state=42)
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores = cross_val_score(clf, X, y, cv=cv, scoring="roc_auc")
+print(f"5-fold CV ROC AUC: {scores.mean():.3f} ± {scores.std():.3f}")
+print(f"Individual fold scores: {scores.round(3)}")
+
+clf.fit(X, y)
+y_score = clf.predict_proba(X)[:, 1]
+print(f"\nIn-sample AUC: {roc_auc_score(y, y_score):.3f}")
+print("\nConfusion matrix (in-sample):")
+print(pd.DataFrame(
+    confusion_matrix(y, (y_score > 0.5).astype(int)),
+    index=["actual competitive", "actual collusive"],
+    columns=["pred competitive", "pred collusive"],
+))
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+# ROC curve
+fpr, tpr, _ = roc_curve(y, y_score)
+axes[0].plot(fpr, tpr, lw=2, label=f"GBM (AUC = {roc_auc_score(y, y_score):.3f})")
+axes[0].plot([0, 1], [0, 1], "--", color="gray", label="Random")
+axes[0].set_xlabel("False positive rate")
+axes[0].set_ylabel("True positive rate")
+axes[0].set_title("ROC on simulated trajectories")
+axes[0].legend()
+
+# Feature importance
+importances = pd.Series(clf.feature_importances_, index=FEATURE_COLS).sort_values()
+importances.plot.barh(ax=axes[1], color="steelblue")
+axes[1].set_xlabel("Feature importance")
+plt.tight_layout(); plt.show()
+
+import pickle
+with open("trained_classifier.pkl", "wb") as f:
+    pickle.dump({"model": clf, "feature_cols": FEATURE_COLS}, f)
+print("Saved trained_classifier.pkl")
+
+def extract_pair_features(price_a, price_b):
+    """Cross-station features. Both arrays same length, >=5 obs after NaN removal."""
+    a = np.asarray(price_a, dtype=float)
+    b = np.asarray(price_b, dtype=float)
+    mask = ~(np.isnan(a) | np.isnan(b))
+    a, b = a[mask], b[mask]
+    if len(a) < 5:
+        return None
+    
+    da, db = np.diff(a), np.diff(b)
+    
+    # Significant change threshold = 0.1% of local mean
+    thresh_a, thresh_b = 0.001 * a.mean(), 0.001 * b.mean()
+    changed_a = np.abs(da) > thresh_a
+    changed_b = np.abs(db) > thresh_b
+    
+    # Level correlation
+    corr_levels = (np.corrcoef(a, b)[0, 1]
+                   if a.std() > 1e-9 and b.std() > 1e-9 else 0.0)
+    
+    # Change correlation -- the key coordination signal
+    corr_changes = (np.corrcoef(da, db)[0, 1]
+                    if da.std() > 1e-9 and db.std() > 1e-9 else 0.0)
+    
+    # Synchrony
+    frac_both_change   = (changed_a & changed_b).mean()
+    frac_both_constant = (~changed_a & ~changed_b).mean()
+    
+    both_idx = changed_a & changed_b
+    frac_same_direction = (
+        (np.sign(da[both_idx]) == np.sign(db[both_idx])).mean()
+        if both_idx.sum() > 0 else 0.5
+    )
+    
+    # Price gap
+    ratio = a / b
+    ratio_cv = ratio.std() / ratio.mean() if ratio.mean() > 0 else 0.0
+    mean_abs_diff = np.abs(a - b).mean() / ((a.mean() + b.mean()) / 2)
+    
+    return {
+        "corr_levels":          corr_levels if not np.isnan(corr_levels) else 0.0,
+        "corr_changes":         corr_changes if not np.isnan(corr_changes) else 0.0,
+        "frac_both_change":     frac_both_change,
+        "frac_both_constant":   frac_both_constant,
+        "frac_same_direction":  frac_same_direction,
+        "ratio_cv":             ratio_cv,
+        "mean_abs_diff":        mean_abs_diff,
+    }
+
+idx = pd.read_csv(TRAJ_DIR / "index.csv")
+
+records = []
+for _, row in idx.iterrows():
+    traj = np.load(TRAJ_DIR / row["traj_file"])    # shape (1000, 2)
+    feats = extract_pair_features(traj[:, 0], traj[:, 1])
+    if feats is None:
+        continue
+    feats.update({
+        "delta": row["delta"], "alpha": row["alpha"],
+        "beta": row["beta"], "seed": row["seed"],
+    })
+    records.append(feats)
+
+pair_df = pd.DataFrame(records)
+pair_df["label"] = (pair_df["delta"] > 0.5).astype(int)
+
+print(f"Pairs: {len(pair_df)}  "
+      f"({pair_df['label'].sum()} collusive, "
+      f"{len(pair_df) - pair_df['label'].sum()} competitive)")
+pair_df.head()
+
+PAIR_FEATURE_COLS = [
+    "corr_levels", "corr_changes", "frac_both_change",
+    "frac_both_constant", "frac_same_direction",
+    "ratio_cv", "mean_abs_diff",
+]
+
+# Distributions by class
+fig, axes = plt.subplots(2, 4, figsize=(13, 6))
+for ax, feat in zip(axes.flat, PAIR_FEATURE_COLS):
+    for label, color in [(0, "tab:blue"), (1, "tab:orange")]:
+        ax.hist(pair_df.loc[pair_df["label"] == label, feat],
+                bins=10, alpha=0.6, color=color,
+                label="collusive" if label == 1 else "competitive")
+    ax.set_title(feat, fontsize=10)
+    ax.legend(fontsize=8)
+for ax in axes.flat[len(PAIR_FEATURE_COLS):]:
+    ax.axis("off")
+plt.tight_layout(); plt.show()
+
+# Train
+X = pair_df[PAIR_FEATURE_COLS].values
+y = pair_df["label"].values
+clf_pair = GradientBoostingClassifier(n_estimators=200, max_depth=3, random_state=42)
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores = cross_val_score(clf_pair, X, y, cv=cv, scoring="roc_auc")
+print(f"\n5-fold CV ROC AUC: {scores.mean():.3f} ± {scores.std():.3f}")
+print(f"Individual folds: {scores.round(3)}")
+
+clf_pair.fit(X, y)
+
+PAIR_FEATURE_COLS = [
+    "corr_levels", "corr_changes", "frac_both_change",
+    "frac_both_constant", "frac_same_direction",
+    "ratio_cv", "mean_abs_diff",
+]
+
+# Distributions by class
+fig, axes = plt.subplots(2, 4, figsize=(13, 6))
+for ax, feat in zip(axes.flat, PAIR_FEATURE_COLS):
+    for label, color in [(0, "tab:blue"), (1, "tab:orange")]:
+        ax.hist(pair_df.loc[pair_df["label"] == label, feat],
+                bins=10, alpha=0.6, color=color,
+                label="collusive" if label == 1 else "competitive")
+    ax.set_title(feat, fontsize=10)
+    ax.legend(fontsize=8)
+for ax in axes.flat[len(PAIR_FEATURE_COLS):]:
+    ax.axis("off")
+plt.tight_layout(); plt.show()
+
+# Train
+X = pair_df[PAIR_FEATURE_COLS].values
+y = pair_df["label"].values
+clf_pair = GradientBoostingClassifier(n_estimators=200, max_depth=3, random_state=42)
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores = cross_val_score(clf_pair, X, y, cv=cv, scoring="roc_auc")
+print(f"\n5-fold CV ROC AUC: {scores.mean():.3f} ± {scores.std():.3f}")
+print(f"Individual folds: {scores.round(3)}")
+
+clf_pair.fit(X, y)
+
+import pickle
+from pathlib import Path
+
+# Load the trained perturbed classifier
+with open("trained_classifier.pkl", "rb") as f:
+    bundle = pickle.load(f)
+clf = bundle["model"]
+FEATURE_COLS = bundle["feature_cols"]
+
+# Load all snapshots into a panel
+SNAPSHOT_DIR = Path("fuel_snapshots")   # adjust if it lives elsewhere
+paths = sorted(SNAPSHOT_DIR.glob("snapshot_*.csv"))
+panel = pd.concat([pd.read_csv(p) for p in paths], ignore_index=True)
+panel["pulled_at"] = pd.to_datetime(panel["pulled_at"], utc=True)
+panel = panel.sort_values(["site_id", "pulled_at"]).reset_index(drop=True)
+
+# Filter out stale retailer feeds (remember the Applegreen issue)
+panel["source_last_updated"] = pd.to_datetime(
+    panel["source_last_updated"], dayfirst=True, errors="coerce", utc=True)
+fresh = (panel["pulled_at"] - panel["source_last_updated"]).dt.days <= 7
+panel = panel[fresh].copy()
+print(f"After staleness filter: {len(panel)} rows, "
+      f"{panel['site_id'].nunique()} stations")
+
+# Per-station diesel price series → features → score
+station_rows = []
+for site, group in panel.groupby("site_id"):
+    prices = group.sort_values("pulled_at")["B7"].dropna().values
+    feats = extract_features(prices)
+    if feats is None:
+        continue
+    feats.update({
+        "site_id":  site,
+        "retailer": group["retailer"].iloc[0],
+        "postcode": group["postcode"].iloc[0],
+        "lat":      group["lat"].iloc[0],
+        "lon":      group["lon"].iloc[0],
+        "n_obs":    len(prices),
+    })
+    station_rows.append(feats)
+
+real_df = pd.DataFrame(station_rows)
+X_real = real_df[FEATURE_COLS].values
+real_df["collusion_score"] = clf.predict_proba(X_real)[:, 1]
+
+print(f"Scored {len(real_df)} stations")
+print(real_df["collusion_score"].describe())
+
+# Quick histogram so you can see the distribution
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(real_df["collusion_score"], bins=20, edgecolor="black", alpha=0.8)
+ax.set_xlabel("Collusion score (0 = competitive, 1 = collusive)")
+ax.set_ylabel("Number of stations")
+ax.set_title(f"Classifier scores across {len(real_df)} Greater London stations")
+ax.set_xlim(0, 1)
+plt.tight_layout(); plt.show()
+
+import pickle
+from pathlib import Path
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+# Load the pair classifier
+with open("trained_classifier_pair.pkl", "rb") as f:
+    bundle = pickle.load(f)
+clf_pair = bundle["model"]
+PAIR_FEATURE_COLS = bundle["feature_cols"]
+
+# Load and filter panel
+SNAPSHOT_DIR = Path("fuel_snapshots")
+paths = sorted(SNAPSHOT_DIR.glob("snapshot_*.csv"))
+panel = pd.concat([pd.read_csv(p) for p in paths], ignore_index=True)
+panel["pulled_at"] = pd.to_datetime(panel["pulled_at"], utc=True)
+panel["source_last_updated"] = pd.to_datetime(
+    panel["source_last_updated"], dayfirst=True, errors="coerce", utc=True
+)
+fresh = (panel["pulled_at"] - panel["source_last_updated"]).dt.days <= 7
+panel = panel[fresh].copy().sort_values(["site_id", "pulled_at"]).reset_index(drop=True)
+
+# Build per-station diesel price series
+station_series, station_meta = {}, {}
+for site, group in panel.groupby("site_id"):
+    g = group.sort_values("pulled_at")
+    prices = g["B7"].dropna().values
+    if len(prices) >= 5:
+        station_series[site] = prices
+        station_meta[site] = {
+            "retailer": g["retailer"].iloc[0],
+            "postcode": g["postcode"].iloc[0],
+            "lat":      g["lat"].iloc[0],
+            "lon":      g["lon"].iloc[0],
+        }
+print(f"Stations with >=5 obs: {len(station_series)}")
+
+# Haversine distance
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    return 2 * R * np.arcsin(np.sqrt(h))
+
+# Pair stations within MAX_DIST_KM
+MAX_DIST_KM = 2.0
+sites = list(station_series.keys())
+pair_rows = []
+
+for i, site_a in enumerate(sites):
+    ma = station_meta[site_a]
+    for site_b in sites[i+1:]:
+        mb = station_meta[site_b]
+        d = haversine_km(ma["lat"], ma["lon"], mb["lat"], mb["lon"])
+        if d > MAX_DIST_KM:
+            continue
+        a, b = station_series[site_a], station_series[site_b]
+        n = min(len(a), len(b))
+        feats = extract_pair_features(a[-n:], b[-n:])
+        if feats is None:
+            continue
+        feats.update({
+            "site_a": site_a, "site_b": site_b,
+            "retailer_a": ma["retailer"], "retailer_b": mb["retailer"],
+            "lat_a": ma["lat"], "lon_a": ma["lon"],
+            "lat_b": mb["lat"], "lon_b": mb["lon"],
+            "distance_km": d, "n_obs": n,
+        })
+        pair_rows.append(feats)
+
+pairs_df = pd.DataFrame(pair_rows)
+X_real = pairs_df[PAIR_FEATURE_COLS].values
+pairs_df["collusion_score"] = clf_pair.predict_proba(X_real)[:, 1]
+
+print(f"\nPairs within {MAX_DIST_KM}km: {len(pairs_df)}")
+print("\nScore distribution:")
+print(pairs_df["collusion_score"].describe())
+
+# Histogram
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(pairs_df["collusion_score"], bins=20, edgecolor="black", alpha=0.8)
+ax.set_xlabel("Pair collusion score")
+ax.set_ylabel("Number of pairs")
+ax.set_title(f"Scores across {len(pairs_df)} station pairs within {MAX_DIST_KM}km")
+ax.set_xlim(0, 1)
+plt.tight_layout(); plt.show()
+
+# Inspect top of the distribution
+print("\nTop 10 highest-scoring pairs:")
+print(pairs_df.sort_values("collusion_score", ascending=False)
+      .head(10)[["retailer_a", "retailer_b", "distance_km", "n_obs", "collusion_score"]])
+
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import numpy as np
+
+HIGH_SCORE_THRESHOLD = 0.5
+LON_RANGE = (-0.55, 0.35)
+LAT_RANGE = (51.25, 51.75)
+
+# Build station df and filter for valid London coords
+stations_df = pd.DataFrame.from_dict(station_meta, orient="index").reset_index()
+stations_df.columns = ["site_id", "retailer", "postcode", "lat", "lon"]
+stations_df = stations_df[
+    stations_df["lat"].between(*LAT_RANGE) &
+    stations_df["lon"].between(*LON_RANGE)
+].copy()
+print(f"Valid London stations: {len(stations_df)}")
+
+# Filter pairs to those with valid coords on both ends
+valid = (
+    pairs_df["lat_a"].between(*LAT_RANGE) &
+    pairs_df["lon_a"].between(*LON_RANGE) &
+    pairs_df["lat_b"].between(*LAT_RANGE) &
+    pairs_df["lon_b"].between(*LON_RANGE)
+)
+pdf = pairs_df[valid].copy()
+print(f"Valid pairs: {len(pdf)}")
+
+high_pairs = pdf[pdf["collusion_score"] > HIGH_SCORE_THRESHOLD]
+low_pairs  = pdf[pdf["collusion_score"] <= HIGH_SCORE_THRESHOLD]
+
+fig, ax = plt.subplots(figsize=(11, 9))
+
+for _, r in low_pairs.iterrows():
+    ax.plot([r["lon_a"], r["lon_b"]], [r["lat_a"], r["lat_b"]],
+            color="lightgray", lw=0.4, alpha=0.5, zorder=1)
+
+for _, r in high_pairs.iterrows():
+    ax.plot([r["lon_a"], r["lon_b"]], [r["lat_a"], r["lat_b"]],
+            color="crimson", lw=2.0, alpha=0.85, zorder=2)
+
+ax.scatter(stations_df["lon"], stations_df["lat"],
+           s=40, c="black", alpha=0.75, zorder=3,
+           edgecolor="white", linewidth=0.5)
+
+ax.set_xlim(*LON_RANGE)
+ax.set_ylim(*LAT_RANGE)
+ax.set_aspect(1 / np.cos(np.radians(51.5)))   # London-correct aspect ratio
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+ax.set_title(
+    f"Greater London petrol stations\n"
+    f"{len(high_pairs)} of {len(pdf)} station pairs within 2km score > {HIGH_SCORE_THRESHOLD}"
+)
+
+legend = [
+    Line2D([0], [0], color="crimson", lw=2.0,
+           label=f"Pair score > {HIGH_SCORE_THRESHOLD}"),
+    Line2D([0], [0], color="lightgray", lw=0.5,
+           label="Pair score below threshold"),
+    Line2D([0], [0], marker="o", color="w", markerfacecolor="black",
+           markersize=7, label="Petrol station"),
+]
+ax.legend(handles=legend, loc="upper right", fontsize=9)
+
+plt.tight_l
+
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import contextily as ctx
+import numpy as np
+
+HIGH_SCORE_THRESHOLD = 0.5
+LON_RANGE = (-0.55, 0.35)
+LAT_RANGE = (51.25, 51.75)
+
+stations_df = pd.DataFrame.from_dict(station_meta, orient="index").reset_index()
+stations_df.columns = ["site_id", "retailer", "postcode", "lat", "lon"]
+stations_df = stations_df[
+    stations_df["lat"].between(*LAT_RANGE) &
+    stations_df["lon"].between(*LON_RANGE)
+].copy()
+
+valid = (
+    pairs_df["lat_a"].between(*LAT_RANGE) &
+    pairs_df["lon_a"].between(*LON_RANGE) &
+    pairs_df["lat_b"].between(*LAT_RANGE) &
+    pairs_df["lon_b"].between(*LON_RANGE)
+)
+pdf = pairs_df[valid].copy()
+
+high_pairs = pdf[pdf["collusion_score"] > HIGH_SCORE_THRESHOLD]
+low_pairs  = pdf[pdf["collusion_score"] <= HIGH_SCORE_THRESHOLD]
+
+fig, ax = plt.subplots(figsize=(11, 9))
+
+for _, r in low_pairs.iterrows():
+    ax.plot([r["lon_a"], r["lon_b"]], [r["lat_a"], r["lat_b"]],
+            color="lightgray", lw=0.5, alpha=0.6, zorder=2)
+
+for _, r in high_pairs.iterrows():
+    ax.plot([r["lon_a"], r["lon_b"]], [r["lat_a"], r["lat_b"]],
+            color="crimson", lw=2.5, alpha=0.9, zorder=3)
+
+ax.scatter(stations_df["lon"], stations_df["lat"],
+           s=45, c="black", alpha=0.85, zorder=4,
+           edgecolor="white", linewidth=0.6)
+
+ax.set_xlim(*LON_RANGE)
+ax.set_ylim(*LAT_RANGE)
+
+# Add the London basemap (this is the new bit)
+ctx.add_basemap(
+    ax,
+    crs="EPSG:4326",
+    source=ctx.providers.CartoDB.Positron,
+    zoom=11,
+)
+
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+ax.set_title(
+    f"Greater London petrol stations\n"
+    f"{len(high_pairs)} of {len(pdf)} station pairs within 2km score > {HIGH_SCORE_THRESHOLD}"
+)
+
+legend = [
+    Line2D([0], [0], color="crimson", lw=2.5,
+           label=f"Pair score > {HIGH_SCORE_THRESHOLD}"),
+    Line2D([0], [0], color="lightgray", lw=0.7,
+           label="Pair score below threshold"),
+    Line2D([0], [0], marker="o", color="w", markerfacecolor="black",
+           markersize=8, label="Petrol station"),
+]
+ax.legend(handles=legend, loc="upper right", fontsize=10, framealpha=0.95)
+
+plt.tight_layout()
+plt.savefig("fig3_london_map.png", dpi=300, bbox_inches="tight")
+plt.show()
