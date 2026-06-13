@@ -1,0 +1,374 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from itertools import product
+from scipy.optimize import fsolve
+import time
+
+np.set_printoptions(precision=3, suppress=True)
+
+class Model:
+    """Bertrand n-opoly with logit demand and Q-learning agents."""
+
+    def __init__(self, **kwargs):
+        self.n = kwargs.get("n", 2)
+        self.alpha = kwargs.get("alpha", 0.15)
+        self.beta = kwargs.get("beta", 4e-6)
+        self.delta = kwargs.get("delta", 0.95)
+        self.c = kwargs.get("c", 1.0)
+        self.a = kwargs.get("a", 2.0)
+        self.a0 = kwargs.get("a0", 0.0)
+        self.mu = kwargs.get("mu", 0.25)
+        self.k = kwargs.get("k", 15)
+        self.tstable = int(kwargs.get("tstable", 1e5))
+        self.tmax = int(kwargs.get("tmax", 1e7))
+
+        self.sdim = (self.k,) * self.n
+        self.s0 = np.zeros(self.n, dtype=int)
+        self.p_competitive, self.p_monopoly = self._benchmarks()
+        self.A = self._action_grid()
+        self.PI = self._profit_table()
+        self.Q = self._init_Q()
+
+    def demand(self, p):
+        e = np.exp((self.a - p) / self.mu)
+        return e / (np.sum(e) + np.exp(self.a0 / self.mu))
+
+    def _foc_nash(self, p):
+        d = self.demand(p)
+        return np.squeeze(1 - (p - self.c) * (1 - d) / self.mu)
+
+    def _foc_monopoly(self, p):
+        d = self.demand(p); d1, p1 = np.flip(d), np.flip(p)
+        return np.squeeze(1 - (p - self.c) * (1 - d) / self.mu
+                          + (p1 - self.c) * d1 / self.mu)
+
+    def _benchmarks(self):
+        p0 = np.ones((1, self.n)) * 3 * self.c
+        return fsolve(self._foc_nash, p0), fsolve(self._foc_monopoly, p0)
+
+    def _action_grid(self):
+        a = np.linspace(min(self.p_competitive), max(self.p_monopoly), self.k - 2)
+        d = a[1] - a[0]
+        return np.linspace(min(a) - d, max(a) + d, self.k)
+
+    def _profit_table(self):
+        PI = np.zeros(self.sdim + (self.n,))
+        for s in product(*[range(i) for i in self.sdim]):
+            p = np.asarray(self.A[np.asarray(s)])
+            PI[s] = (p - self.c) * self.demand(p)
+        return PI
+
+    def _init_Q(self):
+        Q = np.zeros((self.n,) + self.sdim + (self.k,))
+        for n in range(self.n):
+            pi = np.mean(self.PI[..., n], axis=tuple(i for i in range(self.n) if i != n))
+            Q[n] = np.tile(pi, self.sdim + (1,)) / (1 - self.delta)
+        return Q
+
+class Model:
+    """Bertrand n-opoly with logit demand and Q-learning agents."""
+
+    def __init__(self, **kwargs):
+        self.n = kwargs.get("n", 2)
+        self.alpha = kwargs.get("alpha", 0.15)
+        self.beta = kwargs.get("beta", 4e-6)
+        self.delta = kwargs.get("delta", 0.95)
+        self.c = kwargs.get("c", 1.0)
+        self.a = kwargs.get("a", 2.0)
+        self.a0 = kwargs.get("a0", 0.0)
+        self.mu = kwargs.get("mu", 0.25)
+        self.k = kwargs.get("k", 15)
+        self.tstable = int(kwargs.get("tstable", 1e5))
+        self.tmax = int(kwargs.get("tmax", 1e7))
+
+        self.sdim = (self.k,) * self.n
+        self.s0 = np.zeros(self.n, dtype=int)
+        self.p_competitive, self.p_monopoly = self._benchmarks()
+        self.A = self._action_grid()
+        self.PI = self._profit_table()
+        self.Q = self._init_Q()
+
+    def demand(self, p):
+        e = np.exp((self.a - p) / self.mu)
+        return e / (np.sum(e) + np.exp(self.a0 / self.mu))
+
+    def _foc_nash(self, p):
+        d = self.demand(p)
+        return np.squeeze(1 - (p - self.c) * (1 - d) / self.mu)
+
+    def _foc_monopoly(self, p):
+        d = self.demand(p); d1, p1 = np.flip(d), np.flip(p)
+        return np.squeeze(1 - (p - self.c) * (1 - d) / self.mu
+                          + (p1 - self.c) * d1 / self.mu)
+
+    def _benchmarks(self):
+        p0 = np.ones((1, self.n)) * 3 * self.c
+        return fsolve(self._foc_nash, p0), fsolve(self._foc_monopoly, p0)
+
+    def _action_grid(self):
+        a = np.linspace(min(self.p_competitive), max(self.p_monopoly), self.k - 2)
+        d = a[1] - a[0]
+        return np.linspace(min(a) - d, max(a) + d, self.k)
+
+    def _profit_table(self):
+        PI = np.zeros(self.sdim + (self.n,))
+        for s in product(*[range(i) for i in self.sdim]):
+            p = np.asarray(self.A[np.asarray(s)])
+            PI[s] = (p - self.c) * self.demand(p)
+        return PI
+
+    def _init_Q(self):
+        Q = np.zeros((self.n,) + self.sdim + (self.k,))
+        for n in range(self.n):
+            pi = np.mean(self.PI[..., n], axis=tuple(i for i in range(self.n) if i != n))
+            Q[n] = np.tile(pi, self.sdim + (1,)) / (1 - self.delta)
+        return Q
+
+t0 = time.time()
+result = run_one(seed=0, capture_trajectory=True, tstable=3e4, tmax=5e5)
+print(f"Time: {time.time() - t0:.1f}s")
+print(f"Converged: {result['converged']} at t={result['t_final']:,}")
+print(f"Nash:     {result['p_nash']:.3f}")
+print(f"Monopoly: {result['p_monopoly']:.3f}")
+print(f"Average:  {result['p_avg']:.3f}")
+print(f"Delta:    {result['delta']:.3f}")
+
+traj = result["trajectory"]
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.plot(traj[:200, 0], label="Firm 1", lw=1.5)
+ax.plot(traj[:200, 1], label="Firm 2", lw=1.5, alpha=0.8)
+ax.axhline(result["p_nash"], color="gray", ls="--", label="Nash")
+ax.axhline(result["p_monopoly"], color="black", ls="--", label="Monopoly")
+ax.set_xlabel("Period (greedy play after convergence)")
+ax.set_ylabel("Price")
+ax.set_title(f"Converged price trajectory  (Delta = {result['delta']:.2f})")
+ax.legend(loc="lower right")
+plt.tight_layout(); plt.show()
+
+ALPHAS = [0.05, 0.15, 0.25]
+BETAS = [1e-6, 1e-5, 5e-5]
+N_SEEDS = 3
+
+records = []
+total = len(ALPHAS) * len(BETAS) * N_SEEDS
+t_start = time.time()
+i = 0
+
+for alpha in ALPHAS:
+    for beta in BETAS:
+        for seed in range(N_SEEDS):
+            i += 1
+            t0 = time.time()
+            r = run_one(seed=seed, alpha=alpha, beta=beta,
+                        tstable=3e4, tmax=5e5)
+            records.append(r)
+            print(f"  [{i:>2}/{total}] alpha={alpha:.2f} beta={beta:.0e} seed={seed}  "
+                  f"Delta={r['delta']:.2f}  ({time.time()-t0:.0f}s)")
+
+print(f"\nTotal: {time.time() - t_start:.0f}s")
+df = pd.DataFrame(records)
+df.head()
+
+import pandas as pd
+df = pd.read_csv("mini_sweep_results.csv")
+df.head()
+pivot = (df.groupby(["alpha", "beta"])
+           .delta.mean()
+           .unstack("beta"))
+
+fig, ax = plt.subplots(figsize=(7, 5))
+im = ax.imshow(pivot.values, cmap="RdYlBu_r", vmin=0, vmax=1, aspect="auto")
+
+ax.set_xticks(range(len(pivot.columns)))
+ax.set_xticklabels([f"{b:.0e}" for b in pivot.columns])
+ax.set_yticks(range(len(pivot.index)))
+ax.set_yticklabels([f"{a:.2f}" for a in pivot.index])
+ax.set_xlabel("Exploration decay beta")
+ax.set_ylabel("Learning rate alpha")
+ax.set_title("Mean Delta (markup index) across seeds")
+
+for i in range(pivot.shape[0]):
+    for j in range(pivot.shape[1]):
+        ax.text(j, i, f"{pivot.values[i, j]:.2f}",
+                ha="center", va="center",
+                color="white" if pivot.values[i, j] > 0.5 else "black",
+                fontsize=11)
+
+plt.colorbar(im, ax=ax, label="Delta  (0 = Nash, 1 = Monopoly)")
+plt.savefig("fig1_heatmap.png", dpi=300, bbox_inches="tight")
+plt.tight_layout(); plt.show()
+
+df.to_csv("mini_sweep_results.csv", index=False)
+np.save("sample_trajectory.npy", traj)
+print("Wrote mini_sweep_results.csv and sample_trajectory.npy")
+
+import os
+os.makedirs("trajectories", exist_ok=True)
+
+# Hand-picked cells: mix of likely-collusive and likely-competitive parameter
+# regions, so the classifier has both classes to learn from.
+configs = [
+    {"alpha": 0.25, "beta": 1e-6},   # likely collusive
+    {"alpha": 0.20, "beta": 5e-6},   # likely collusive
+    {"alpha": 0.15, "beta": 1e-5},   # middle
+    {"alpha": 0.10, "beta": 1e-5},   # middle
+    {"alpha": 0.05, "beta": 5e-5},   # likely competitive
+    {"alpha": 0.05, "beta": 1e-4},   # likely competitive
+]
+N_SEEDS = 8   # 6 cells x 8 seeds = 48 trajectories
+
+records = []
+t_start = time.time()
+total = len(configs) * N_SEEDS
+i = 0
+
+for cfg in configs:
+    for seed in range(N_SEEDS):
+        i += 1
+        t0 = time.time()
+        r = run_one(seed=seed, capture_trajectory=True,
+                    tstable=3e4, tmax=5e5, **cfg)
+        fname = f"traj_a{cfg['alpha']:.3f}_b{cfg['beta']:.0e}_s{seed}.npy"
+        np.save(f"trajectories/{fname}", r["trajectory"])
+        traj = r.pop("trajectory")
+        r["traj_file"] = fname
+        records.append(r)
+        print(f"  [{i:>2}/{total}] a={cfg['alpha']:.2f} b={cfg['beta']:.0e} seed={seed}  "
+              f"Δ={r['delta']:.2f}  ({time.time()-t0:.0f}s)")
+
+pd.DataFrame(records).to_csv("trajectories/index.csv", index=False)
+print(f"\nDone in {time.time() - t_start:.0f}s. Wrote {len(records)} trajectories.")
+
+idx = pd.read_csv("trajectories/index.csv")
+
+# Pick the most and least collusive trajectories we collected
+collusive_row   = idx.sort_values("delta", ascending=False).iloc[0]
+competitive_row = idx.sort_values("delta", ascending=True).iloc[0]
+
+traj_coll = np.load(f"trajectories/{collusive_row['traj_file']}")
+traj_comp = np.load(f"trajectories/{competitive_row['traj_file']}")
+
+p_nash = collusive_row["p_nash"]
+p_mono = collusive_row["p_monopoly"]
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4), sharey=True)
+
+for ax, traj, row, title in [
+    (axes[0], traj_coll, collusive_row,   f"Collusive run  (Δ = {collusive_row['delta']:.2f})"),
+    (axes[1], traj_comp, competitive_row, f"Competitive run  (Δ = {competitive_row['delta']:.2f})"),
+]:
+    ax.plot(traj[:200, 0], lw=1.5, label="Firm 1")
+    ax.plot(traj[:200, 1], lw=1.5, alpha=0.8, label="Firm 2")
+    ax.axhline(p_nash, color="gray", ls="--", label="Nash")
+    ax.axhline(p_mono, color="black", ls="--", label="Monopoly")
+    ax.set_xlabel("Period (greedy play after learning)")
+    ax.set_title(title)
+    ax.legend(loc="lower right", fontsize=9)
+
+axes[0].set_ylabel("Price")
+plt.tight_layout(); plt.show()
+
+def _greedy_trajectory_perturbed(game, s_init, n_periods=1000, perturb_prob=0.02, rng=None):
+    """Greedy policy with small per-period chance of a random deviation."""
+    if rng is None:
+        rng = np.random
+    s = s_init.copy()
+    prices = []
+    for _ in range(n_periods):
+        a = np.zeros(game.n, dtype=int)
+        for i in range(game.n):
+            if rng.rand() < perturb_prob:
+                a[i] = rng.randint(0, game.k)
+            else:
+                a[i] = np.argmax(game.Q[(i,) + tuple(s)])
+        prices.append(game.A[a])
+        s = a
+    return np.array(prices)
+
+
+def run_one_perturbed(seed=0, perturb_prob=0.02, **kwargs):
+    """Like run_one, but saved trajectory is from perturbed greedy play.
+       Δ is still measured from PURE greedy (for label consistency)."""
+    np.random.seed(seed)
+    game = Model(**kwargs)
+    converged, t_final, s_final = _simulate(game)
+
+    traj_pure = _greedy_trajectory(game, s_final, n_periods=1000)
+    p_nash = float(game.p_competitive[0])
+    p_mono = float(game.p_monopoly[0])
+    p_avg_pure = float(traj_pure.mean())
+    delta = (p_avg_pure - p_nash) / (p_mono - p_nash)
+
+    pert_rng = np.random.RandomState(seed + 99999)
+    traj_pert = _greedy_trajectory_perturbed(
+        game, s_final, n_periods=1000, perturb_prob=perturb_prob, rng=pert_rng,
+    )
+
+    return {
+        "seed": seed, "alpha": game.alpha, "beta": game.beta, "n": game.n,
+        "converged": converged, "t_final": t_final,
+        "p_nash": p_nash, "p_monopoly": p_mono, "p_avg_pure": p_avg_pure,
+        "delta": delta,
+        "trajectory": traj_pert,
+    }
+
+import os
+os.makedirs("trajectories_perturbed", exist_ok=True)
+
+configs = [
+    {"alpha": 0.25, "beta": 1e-6},
+    {"alpha": 0.20, "beta": 5e-6},
+    {"alpha": 0.15, "beta": 1e-5},
+    {"alpha": 0.10, "beta": 1e-5},
+    {"alpha": 0.05, "beta": 5e-5},
+    {"alpha": 0.05, "beta": 1e-4},
+]
+N_SEEDS = 8
+PERTURB_PROB = 0.02
+
+records = []
+t_start = time.time()
+total = len(configs) * N_SEEDS
+i = 0
+for cfg in configs:
+    for seed in range(N_SEEDS):
+        i += 1
+        t0 = time.time()
+        r = run_one_perturbed(seed=seed, perturb_prob=PERTURB_PROB,
+                              tstable=3e4, tmax=5e5, **cfg)
+        fname = f"traj_a{cfg['alpha']:.3f}_b{cfg['beta']:.0e}_s{seed}.npy"
+        np.save(f"trajectories_perturbed/{fname}", r["trajectory"])
+        r.pop("trajectory")
+        r["traj_file"] = fname
+        records.append(r)
+        print(f"  [{i:>2}/{total}] a={cfg['alpha']:.2f} b={cfg['beta']:.0e} seed={seed}  "
+              f"Δ={r['delta']:.2f}  ({time.time()-t0:.0f}s)")
+
+pd.DataFrame(records).to_csv("trajectories_perturbed/index.csv", index=False)
+print(f"\nDone in {time.time() - t_start:.0f}s.")
+
+import pandas as pd
+import numpy as np
+from pathlib import Path
+idx_p = pd.read_csv("trajectories_perturbed/index.csv")
+high_d = idx_p.sort_values("delta", ascending=False).iloc[0]
+low_d  = idx_p.sort_values("delta", ascending=True).iloc[0]
+
+t_high = np.load(f"trajectories_perturbed/{high_d['traj_file']}")
+t_low  = np.load(f"trajectories_perturbed/{low_d['traj_file']}")
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4), sharey=True)
+for ax, t, row, title in [
+    (axes[0], t_high, high_d, f"Perturbed collusive  (Δ = {high_d['delta']:.2f})"),
+    (axes[1], t_low,  low_d,  f"Perturbed competitive  (Δ = {low_d['delta']:.2f})"),
+]:
+    ax.plot(t[:300, 0], lw=1.0, label="Firm 1")
+    ax.plot(t[:300, 1], lw=1.0, alpha=0.8, label="Firm 2")
+    ax.axhline(row["p_nash"], color="gray", ls="--", label="Nash")
+    ax.axhline(row["p_monopoly"], color="black", ls="--", label="Monopoly")
+    ax.set_xlabel("Period"); ax.set_title(title)
+    ax.legend(loc="lower right", fontsize=9)
+axes[0].set_ylabel("Price")
+plt.savefig("fig2_trajectories.png", dpi=300, bbox_inches="tight")
+plt.tight_layout(); plt.show()
