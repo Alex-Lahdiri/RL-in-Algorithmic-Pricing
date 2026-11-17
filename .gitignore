@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# Written by the scripts; regenerate with the commands in the README
+trajectories/
+trajectories_perturbed/
+mini_sweep_results.csv
+pair_scores.csv
+*.pkl
+figures/*
+!figures/fig1_heatmap.png
+!figures/fig2_trajectories.png

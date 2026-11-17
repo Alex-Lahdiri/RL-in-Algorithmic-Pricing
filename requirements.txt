@@ -1,0 +1,9 @@
+numpy
+pandas
+scipy
+matplotlib
+scikit-learn>=1.0
+requests
+
+# Optional: draws a street map under the London figure in score_stations.py
+contextily
